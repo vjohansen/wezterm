@@ -83,6 +83,12 @@ As features stabilize some brief notes about them will accumulate here.
   Thanks to @rafaelsteil! #8096
 * [wezterm.serde](config/lua/wezterm.serde/index.md) module for serialization
   and deserialization of JSON, TOML and YAML. Thanks to @expnn! #4969
+* Support for the [Program Status
+  Protocol](https://www.superlogical.com/rex/docs/build/program-status)
+  (`OSC 7501`), which lets a program report that it is idle, working, done,
+  blocked on the user or failed. See
+  [pane:get_program_status()](config/lua/pane/get_program_status.md) and
+  [pane:clear_program_status()](config/lua/pane/clear_program_status.md).
 * `wezterm ssh` now supports agent forwarding. Thanks to @Riatre! #5345
 * SSH multiplexer domains now support agent forwarding, and will automatically
   maintain `SSH_AUTH_SOCK` to an appropriate value on the destination host,

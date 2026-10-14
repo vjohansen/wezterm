@@ -153,6 +153,24 @@ impl UserData for MuxPane {
             lua.to_value(&progress)
         });
 
+        methods.add_method("get_program_status", |lua, this, _: ()| {
+            let mux = get_mux()?;
+            let pane = this.resolve(&mux)?;
+            let status = pane.get_program_status();
+            // Absent fields become nil rather than a null sentinel
+            lua.to_value_with(
+                &status,
+                mlua::SerializeOptions::new().serialize_none_to_null(false),
+            )
+        });
+
+        methods.add_method("clear_program_status", |_, this, _: ()| {
+            let mux = get_mux()?;
+            let pane = this.resolve(&mux)?;
+            pane.clear_program_status();
+            Ok(())
+        });
+
         methods.add_method("get_current_working_dir", |_, this, _: ()| {
             let mux = get_mux()?;
             let pane = this.resolve(&mux)?;

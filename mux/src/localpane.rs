@@ -31,8 +31,9 @@ use url::Url;
 use wezterm_dynamic::Value;
 use wezterm_term::color::ColorPalette;
 use wezterm_term::{
-    Alert, AlertHandler, Clipboard, DownloadHandler, KeyCode, KeyModifiers, MouseEvent, Progress,
-    SemanticZone, StableRowIndex, Terminal, TerminalConfiguration, TerminalSize,
+    Alert, AlertHandler, Clipboard, DownloadHandler, KeyCode, KeyModifiers, MouseEvent,
+    ProgramStatus, Progress, SemanticZone, StableRowIndex, Terminal, TerminalConfiguration,
+    TerminalSize,
 };
 
 const PROC_INFO_CACHE_TTL: Duration = Duration::from_millis(300);
@@ -274,6 +275,7 @@ impl Pane for LocalPane {
         let mut brief = String::new();
         let mut trailer = String::new();
         let cmd = &self.command_description;
+        let mut child_exited = false;
 
         match &mut *proc {
             ProcessState::Running {
@@ -288,6 +290,7 @@ impl Pane for LocalPane {
                 };
 
                 if let Some(status) = status {
+                    child_exited = true;
                     let success = match status.success() {
                         true => true,
                         false => configuration()
@@ -364,11 +367,20 @@ impl Pane for LocalPane {
             emit_output_for_pane(self.pane_id, &notify);
         }
 
-        match &*proc {
+        let dead = match &*proc {
             ProcessState::Running { .. } => false,
             ProcessState::DeadPendingClose { .. } => false,
             ProcessState::Dead => true,
+        };
+        drop(proc);
+
+        if child_exited {
+            // working and blocked program status records do not
+            // survive the exit of the process attached to the pane
+            self.terminal.lock().drop_transient_program_status();
         }
+
+        dead
     }
 
     fn set_clipboard(&self, clipboard: &Arc<dyn Clipboard>) {
@@ -464,6 +476,14 @@ impl Pane for LocalPane {
 
     fn get_progress(&self) -> Progress {
         self.terminal.lock().get_progress()
+    }
+
+    fn get_program_status(&self) -> Option<ProgramStatus> {
+        self.terminal.lock().get_program_status()
+    }
+
+    fn clear_program_status(&self) {
+        self.terminal.lock().clear_program_status();
     }
 
     fn palette(&self) -> ColorPalette {

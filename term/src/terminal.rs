@@ -42,6 +42,49 @@ pub enum Progress {
     Indeterminate,
 }
 
+/// The state of an OSC 7501 Program Status record
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "use_serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "use_serde", serde(rename_all = "lowercase"))]
+pub enum ProgramState {
+    Idle,
+    Working,
+    Done,
+    Blocked,
+    Error,
+}
+
+/// What a `blocked` program is waiting on
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "use_serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "use_serde", serde(rename_all = "lowercase"))]
+pub enum ProgramStatusKind {
+    Permission,
+    Question,
+    Auth,
+}
+
+/// The root OSC 7501 Program Status record.
+/// `title` and `msg` hold decoded text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "use_serde", derive(Serialize, Deserialize))]
+pub struct ProgramStatus {
+    pub state: ProgramState,
+    pub kind: Option<ProgramStatusKind>,
+    pub progress: Option<u8>,
+    pub app: Option<String>,
+    pub title: Option<String>,
+    pub msg: Option<String>,
+}
+
+impl ProgramStatus {
+    /// `working` and `blocked` records do not survive process exit
+    /// or the start of a new shell prompt
+    pub fn is_transient(&self) -> bool {
+        matches!(self.state, ProgramState::Working | ProgramState::Blocked)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "use_serde", derive(Serialize, Deserialize))]
 pub enum Alert {
@@ -71,6 +114,8 @@ pub enum Alert {
     OutputSinceFocusLost,
     /// A change to the progress bar state
     Progress(Progress),
+    /// A change to the OSC 7501 program status record
+    ProgramStatus(Option<ProgramStatus>),
 }
 
 pub trait AlertHandler: Send + Sync {

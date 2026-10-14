@@ -52,6 +52,8 @@ pub enum OperatingSystemCommand {
     ResetColors(Vec<u8>),
     RxvtExtension(Vec<String>),
     ConEmuProgress(Progress),
+    /// OSC 7501 Program Status Protocol. `None` is the `?` feature query.
+    ProgramStatus(Option<ProgramStatusReport>),
 
     Unspecified(Vec<Vec<u8>>),
 }
@@ -317,6 +319,17 @@ impl OperatingSystemCommand {
             )),
             SetHyperlink => Ok(OperatingSystemCommand::SetHyperlink(Hyperlink::parse(osc)?)),
             ManipulateSelectionData => Self::parse_selection(osc),
+            ProgramStatus => {
+                if osc.len() != 2 {
+                    bail!("wrong param count");
+                }
+                if osc[1] == b"?" {
+                    Ok(OperatingSystemCommand::ProgramStatus(None))
+                } else {
+                    ProgramStatusReport::parse(osc[1])
+                        .map(|r| OperatingSystemCommand::ProgramStatus(Some(r)))
+                }
+            }
             SystemNotification => {
                 if osc.len() >= 3 && osc[1] == b"4" {
                     fn get_pct(v: &&[u8]) -> u8 {
@@ -499,6 +512,8 @@ osc_entries!(
     RxvtProprietary = "777",
     FinalTermSemanticPrompt = "133",
     ITermProprietary = "1337",
+    /// Program Status Protocol
+    ProgramStatus = "7501",
     /// Here the "Sun" suffix comes from the table in
     /// <https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h3-Miscellaneous>
     /// that lays out various window related escape sequences.
@@ -612,6 +627,8 @@ impl Display for OperatingSystemCommand {
             ConEmuProgress(Progress::SetError(pct)) => write!(f, "9;4;2;{pct}")?,
             ConEmuProgress(Progress::SetIndeterminate) => write!(f, "9;4;3")?,
             ConEmuProgress(Progress::Paused) => write!(f, "9;4;4")?,
+            ProgramStatus(None) => write!(f, "7501;?")?,
+            ProgramStatus(Some(report)) => write!(f, "7501;{report}")?,
         };
         // Use the longer form ST as neovim doesn't like the BEL version
         write!(f, "\x1b\\")?;
@@ -887,6 +904,310 @@ pub enum Progress {
     SetError(u8),
     SetIndeterminate,
     Paused,
+}
+
+/// The `state` of an OSC 7501 Program Status report.
+/// See <https://www.superlogical.com/rex/docs/build/program-status>
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgramState {
+    Idle,
+    Working,
+    Done,
+    Blocked,
+    Error,
+    /// Not a state; removes the addressed record
+    Clear,
+}
+
+impl ProgramState {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "idle" => Some(Self::Idle),
+            "working" => Some(Self::Working),
+            "done" => Some(Self::Done),
+            "blocked" => Some(Self::Blocked),
+            "error" => Some(Self::Error),
+            "clear" => Some(Self::Clear),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Working => "working",
+            Self::Done => "done",
+            Self::Blocked => "blocked",
+            Self::Error => "error",
+            Self::Clear => "clear",
+        }
+    }
+}
+
+/// What a `blocked` program is waiting on
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgramStatusKind {
+    Permission,
+    Question,
+    Auth,
+}
+
+impl ProgramStatusKind {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "permission" => Some(Self::Permission),
+            "question" => Some(Self::Question),
+            "auth" => Some(Self::Auth),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Permission => "permission",
+            Self::Question => "question",
+            Self::Auth => "auth",
+        }
+    }
+}
+
+/// An OSC 7501 report. `title` and `msg` hold the decoded text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramStatusReport {
+    pub state: ProgramState,
+    pub id: Option<String>,
+    pub kind: Option<ProgramStatusKind>,
+    pub progress: Option<u8>,
+    pub app: Option<String>,
+    pub title: Option<String>,
+    pub msg: Option<String>,
+}
+
+impl ProgramStatusReport {
+    /// Whole sequence, OSC through ST
+    const MAX_SEQUENCE_LEN: usize = 4096;
+    /// Length of `ESC ] 7501 ;` plus `ESC \`
+    const SEQUENCE_OVERHEAD: usize = 9;
+    const MAX_KEY_LEN: usize = 16;
+    const MAX_APP_LEN: usize = 32;
+    const MAX_TITLE_ENCODED_LEN: usize = 256;
+    const MAX_TITLE_LEN: usize = 192;
+    const MAX_MSG_ENCODED_LEN: usize = 2732;
+    const MAX_MSG_LEN: usize = 2048;
+    const MAX_ID_LEN: usize = 128;
+    const MAX_ID_SEGMENT_LEN: usize = 32;
+    const MAX_ID_DEPTH: usize = 8;
+
+    fn is_value_byte(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b"_.,+/=-".contains(&b)
+    }
+
+    fn is_name_byte(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b"_.+-".contains(&b)
+    }
+
+    /// Decodes a base64 free-text value, enforcing the encoded and
+    /// decoded size limits, rejecting control characters and removing
+    /// invisible formatting characters.
+    fn decode_text(value: &str, max_encoded: usize, max_decoded: usize) -> Result<String> {
+        use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
+        ensure!(value.len() <= max_encoded, "encoded text too long");
+        // Padding is optional, but when present it must be complete
+        let padding = if value.ends_with('=') {
+            DecodePaddingMode::RequireCanonical
+        } else {
+            DecodePaddingMode::RequireNone
+        };
+        // Unused bits in the last character must be zero, as with a
+        // strict decoder, so each text has a single encoding
+        let bytes = GeneralPurpose::new(
+            &base64::alphabet::STANDARD,
+            GeneralPurposeConfig::new()
+                .with_decode_allow_trailing_bits(false)
+                .with_decode_padding_mode(padding),
+        )
+        .decode(value)
+        .map_err(|err| format_err!("base64 decode: {:#}", err))?;
+        ensure!(bytes.len() <= max_decoded, "decoded text too long");
+        let text = String::from_utf8(bytes)?;
+        ensure!(
+            !text.chars().any(char::is_control),
+            "decoded text contains a control character"
+        );
+        // The text is shown outside the terminal grid, eg: in a tab
+        // title, where a direction override could make it look like
+        // something else
+        Ok(text
+            .chars()
+            .filter(|&c| !Self::is_invisible_format(c))
+            .collect())
+    }
+
+    /// Bidirectional formatting characters, and invisible formatting
+    /// characters with no visible effect. The zero width joiner and
+    /// non-joiner are kept, as emoji sequences and some scripts need
+    /// them.
+    fn is_invisible_format(c: char) -> bool {
+        matches!(
+            c,
+            // Arabic letter mark, left-to-right and right-to-left marks
+            '\u{061c}' | '\u{200e}' | '\u{200f}'
+            // Embeddings, overrides and isolates
+            | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+            // Zero width space, word joiner and invisible operators
+            | '\u{200b}' | '\u{2060}'..='\u{2064}'
+            // Deprecated format characters
+            | '\u{206a}'..='\u{206f}'
+            // Zero width no-break space (byte order mark)
+            | '\u{feff}'
+            // Interlinear annotation characters
+            | '\u{fff9}'..='\u{fffb}'
+        )
+    }
+
+    fn parse(body: &[u8]) -> Result<Self> {
+        ensure!(
+            body.len() + Self::SEQUENCE_OVERHEAD <= Self::MAX_SEQUENCE_LEN,
+            "report too long"
+        );
+
+        let mut pairs: BTreeMap<&str, &str> = BTreeMap::new();
+        for pair in body.split(|&b| b == b':') {
+            // Malformed pairs are skipped, the rest of the report still applies
+            let Some(eq) = pair.iter().position(|&b| b == b'=') else {
+                continue;
+            };
+            let key = pair[..eq].trim_ascii();
+            let value = pair[eq + 1..].trim_ascii();
+            // A key that is too long breaks a limit, even one that is
+            // otherwise malformed
+            ensure!(key.len() <= Self::MAX_KEY_LEN, "key too long");
+            if key.is_empty()
+                || !key.iter().all(u8::is_ascii_lowercase)
+                || !value.iter().copied().all(Self::is_value_byte)
+            {
+                continue;
+            }
+            // Both are ASCII by now
+            let key = str::from_utf8(key)?;
+            let value = str::from_utf8(value)?;
+            // Every value is checked against its limits, even one that a
+            // later pair replaces, because any violation discards the report
+            match key {
+                "id" => Self::validate_id(value)?,
+                "app" => ensure!(value.len() <= Self::MAX_APP_LEN, "app too long"),
+                "title" => ensure!(
+                    value.len() <= Self::MAX_TITLE_ENCODED_LEN,
+                    "encoded title too long"
+                ),
+                "msg" => ensure!(
+                    value.len() <= Self::MAX_MSG_ENCODED_LEN,
+                    "encoded msg too long"
+                ),
+                _ => {}
+            }
+            pairs.insert(key, value);
+        }
+
+        let state = pairs
+            .get("state")
+            .and_then(|s| ProgramState::parse(s))
+            .ok_or_else(|| format_err!("missing or unknown state"))?;
+
+        let app = pairs
+            .get("app")
+            .filter(|app| !app.is_empty() && app.bytes().all(Self::is_name_byte))
+            .map(|app| app.to_string());
+
+        let title = pairs
+            .get("title")
+            .map(|v| Self::decode_text(v, Self::MAX_TITLE_ENCODED_LEN, Self::MAX_TITLE_LEN))
+            .transpose()?
+            .filter(|text| !text.is_empty());
+        let msg = pairs
+            .get("msg")
+            .map(|v| Self::decode_text(v, Self::MAX_MSG_ENCODED_LEN, Self::MAX_MSG_LEN))
+            .transpose()?
+            .filter(|text| !text.is_empty());
+
+        // kind only means something for blocked, progress for working
+        // and blocked; elsewhere they are treated as absent
+        let kind = match state {
+            ProgramState::Blocked => pairs.get("kind").and_then(|k| ProgramStatusKind::parse(k)),
+            _ => None,
+        };
+        let progress = match state {
+            ProgramState::Working | ProgramState::Blocked => {
+                pairs.get("progress").and_then(|p| Self::parse_progress(p))
+            }
+            _ => None,
+        };
+
+        Ok(Self {
+            state,
+            id: pairs.get("id").map(|id| id.to_string()),
+            kind,
+            progress,
+            app,
+            title,
+            msg,
+        })
+    }
+
+    /// Validates an id: names joined by single slashes, within the limits.
+    /// An invalid id discards the report so that it never falls back to
+    /// the root record; for `state=clear` that would remove every record.
+    fn validate_id(id: &str) -> Result<()> {
+        ensure!(id.len() <= Self::MAX_ID_LEN, "id too long");
+        let segments = id.split('/');
+        ensure!(
+            segments.clone().count() <= Self::MAX_ID_DEPTH,
+            "id too deep"
+        );
+        for seg in segments {
+            ensure!(
+                !seg.is_empty()
+                    && seg.len() <= Self::MAX_ID_SEGMENT_LEN
+                    && seg.bytes().all(Self::is_name_byte),
+                "invalid id"
+            );
+        }
+        Ok(())
+    }
+
+    /// Parses a whole number from 0 to 100; anything else, including a
+    /// sign, is treated as absent
+    fn parse_progress(value: &str) -> Option<u8> {
+        if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        value.parse::<u8>().ok().filter(|p| *p <= 100)
+    }
+}
+
+impl Display for ProgramStatusReport {
+    fn fmt(&self, f: &mut Formatter) -> FmtResult {
+        write!(f, "state={}", self.state.as_str())?;
+        if let Some(id) = &self.id {
+            write!(f, ":id={id}")?;
+        }
+        if let Some(kind) = self.kind {
+            write!(f, ":kind={}", kind.as_str())?;
+        }
+        if let Some(progress) = self.progress {
+            write!(f, ":progress={progress}")?;
+        }
+        if let Some(app) = &self.app {
+            write!(f, ":app={app}")?;
+        }
+        if let Some(title) = &self.title {
+            write!(f, ":title={}", base64_encode(title))?;
+        }
+        if let Some(msg) = &self.msg {
+            write!(f, ":msg={}", base64_encode(msg))?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1743,6 +2064,352 @@ mod test {
             parse(&["9", "4", "4"], "\x1b]9;4;4\x1b\\"),
             OperatingSystemCommand::ConEmuProgress(Progress::Paused)
         );
+    }
+
+    fn report(state: ProgramState) -> ProgramStatusReport {
+        ProgramStatusReport {
+            state,
+            id: None,
+            kind: None,
+            progress: None,
+            app: None,
+            title: None,
+            msg: None,
+        }
+    }
+
+    fn unspecified(osc: &[&str]) -> OperatingSystemCommand {
+        OperatingSystemCommand::Unspecified(osc.iter().map(|s| s.as_bytes().to_vec()).collect())
+    }
+
+    #[test]
+    fn program_status() {
+        // The example from the spec
+        let body = "state=blocked:kind=permission:app=terraform:msg=QXBwbHkgMyB0byBhZGQsIDEgdG8gY2hhbmdlLCAwIHRvIGRlc3Ryb3k/";
+        assert_eq!(
+            parse(&["7501", body], &format!("\x1b]7501;{body}\x1b\\")),
+            OperatingSystemCommand::ProgramStatus(Some(ProgramStatusReport {
+                kind: Some(ProgramStatusKind::Permission),
+                app: Some("terraform".into()),
+                msg: Some("Apply 3 to add, 1 to change, 0 to destroy?".into()),
+                ..report(ProgramState::Blocked)
+            }))
+        );
+
+        // Feature detection
+        assert_eq!(
+            parse(&["7501", "?"], "\x1b]7501;?\x1b\\"),
+            OperatingSystemCommand::ProgramStatus(None)
+        );
+
+        // id, title and progress; padding-less base64 is re-encoded with padding
+        assert_eq!(
+            parse(
+                &[
+                    "7501",
+                    "state=working:id=us-east:title=VVMgRWFzdA:progress=40"
+                ],
+                "\x1b]7501;state=working:id=us-east:progress=40:title=VVMgRWFzdA==\x1b\\"
+            ),
+            OperatingSystemCommand::ProgramStatus(Some(ProgramStatusReport {
+                id: Some("us-east".into()),
+                progress: Some(40),
+                title: Some("US East".into()),
+                ..report(ProgramState::Working)
+            }))
+        );
+
+        // A pair with bytes outside the value set is skipped, not fatal
+        assert_eq!(
+            parse(
+                &["7501", "state=done:msg=!!!!"],
+                "\x1b]7501;state=done\x1b\\"
+            ),
+            OperatingSystemCommand::ProgramStatus(Some(report(ProgramState::Done)))
+        );
+
+        // Malformed pairs, unknown keys, whitespace, unknown kind and
+        // out of range progress are dropped; the last value of a key wins
+        assert_eq!(
+            parse(
+                &[
+                    "7501",
+                    " state = idle :nope:=x:Bad=1:app=a b:zzz=1:kind=other:progress=150:app=one:app=two"
+                ],
+                "\x1b]7501;state=idle:app=two\x1b\\"
+            ),
+            OperatingSystemCommand::ProgramStatus(Some(ProgramStatusReport {
+                app: Some("two".into()),
+                ..report(ProgramState::Idle)
+            }))
+        );
+    }
+
+    #[test]
+    fn program_status_discarded() {
+        for body in [
+            // no state, unknown state
+            "app=x",
+            "state=sleeping",
+            // bad base64 (but within the value character set)
+            "state=done:msg=A",
+            // decoded control character: "a\nb"
+            "state=done:msg=YQpi",
+            // key too long
+            "state=done:abcdefghijklmnopq=1",
+            // invalid id
+            "state=done:id=a//b",
+            // app too long
+            "state=done:app=abcdefghijklmnopqrstuvwxyz0123456789",
+        ] {
+            assert_eq!(
+                parse(&["7501", body], &format!("\x1b]7501;{body}\x1b\\")),
+                unspecified(&["7501", body]),
+                "{body}"
+            );
+        }
+
+        // msg over the encoded limit
+        let body = format!("state=done:msg={}", "A".repeat(2736));
+        assert_eq!(
+            parse(&["7501", &body], &format!("\x1b]7501;{body}\x1b\\")),
+            unspecified(&["7501", &body])
+        );
+    }
+
+    // The program status tests below are ported from Ghostty's OSC 7501
+    // parser (src/terminal/osc/parsers/program_status.zig)
+
+    fn status_report(body: &str) -> Option<ProgramStatusReport> {
+        ProgramStatusReport::parse(body.as_bytes()).ok()
+    }
+
+    #[test]
+    fn program_status_padding_is_optional() {
+        let r = status_report("state=done:msg=UGxhbg").unwrap();
+        assert_eq!(r.msg.as_deref(), Some("Plan"));
+    }
+
+    #[test]
+    fn program_status_whitespace() {
+        let r = status_report(" state = working :\tapp=cargo\t").unwrap();
+        assert_eq!(r.state, ProgramState::Working);
+        assert_eq!(r.app.as_deref(), Some("cargo"));
+    }
+
+    #[test]
+    fn program_status_last_value_wins() {
+        let r = status_report("state=idle:app=a:state=done:app=b").unwrap();
+        assert_eq!(r.state, ProgramState::Done);
+        assert_eq!(r.app.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn program_status_malformed_pairs_skipped() {
+        let r =
+            status_report("garbage:=x:Bad=1:app=b@d:future=yes:state=working:app=ok:::").unwrap();
+        assert_eq!(r.state, ProgramState::Working);
+        assert_eq!(r.app.as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn program_status_kind_and_progress_only_apply_to_some_states() {
+        let r = status_report("state=working:kind=auth:progress=10").unwrap();
+        assert_eq!(r.kind, None);
+        assert_eq!(r.progress, Some(10));
+
+        let r = status_report("state=done:kind=auth:progress=10").unwrap();
+        assert_eq!(r.kind, None);
+        assert_eq!(r.progress, None);
+
+        let r = status_report("state=blocked:kind=auth:progress=10").unwrap();
+        assert_eq!(r.kind, Some(ProgramStatusKind::Auth));
+        assert_eq!(r.progress, Some(10));
+
+        let r = status_report("state=blocked:kind=dance").unwrap();
+        assert_eq!(r.kind, None);
+    }
+
+    #[test]
+    fn program_status_out_of_range_progress_is_absent() {
+        for (value, expected) in [
+            ("0", Some(0)),
+            ("100", Some(100)),
+            ("101", None),
+            ("256", None),
+            ("99999999999999999999", None),
+            ("-1", None),
+            ("+1", None),
+            ("4.5", None),
+            ("1_0", None),
+            ("007", Some(7)),
+            ("", None),
+        ] {
+            let r = status_report(&format!("state=working:progress={value}")).unwrap();
+            assert_eq!(r.progress, expected, "{value}");
+        }
+    }
+
+    #[test]
+    fn program_status_invalid_app_is_ignored() {
+        let r = status_report("state=idle:app=a/b").unwrap();
+        assert_eq!(r.app, None);
+    }
+
+    #[test]
+    fn program_status_ids() {
+        let max_segment = "a".repeat(32);
+        for id in [
+            "a".to_string(),
+            "build/test".to_string(),
+            "A-Z_0.9+".to_string(),
+            max_segment.clone(),
+            "a/b/c/d/e/f/g/h".to_string(),
+        ] {
+            let r = status_report(&format!("state=clear:id={id}")).unwrap();
+            assert_eq!(r.id.as_deref(), Some(id.as_str()));
+        }
+
+        // An invalid id discards the report so that it can never fall
+        // back to the root record
+        for id in [
+            "".to_string(),
+            "/".to_string(),
+            "a/".to_string(),
+            "/a".to_string(),
+            "a//b".to_string(),
+            "a,b".to_string(),
+            "a=b".to_string(),
+            format!("{max_segment}a"),
+            "a/b/c/d/e/f/g/h/i".to_string(),
+            format!("{}a", format!("{}/", "a".repeat(31)).repeat(4)),
+        ] {
+            assert_eq!(status_report(&format!("state=clear:id={id}")), None, "{id}");
+        }
+
+        // Even when a later id is valid
+        assert_eq!(status_report("state=clear:id=a//b:id=ok"), None);
+    }
+
+    #[test]
+    fn program_status_text_must_decode_to_safe_utf8() {
+        for body in [
+            // Not base64
+            "state=done:msg=a",
+            "state=done:msg=QQ=",
+            "state=done:title=a",
+            // "a\nb", a control character
+            "state=done:msg=YQpi",
+            // "\u{9b}", a C1 control character as UTF-8
+            "state=done:msg=wps=",
+            // Invalid UTF-8
+            "state=done:msg=/w==",
+            // Non-zero unused bits: "QR" and "QUF" would decode to "A" and
+            // "AA", whose encodings are "QQ" and "QUE"
+            "state=done:msg=QR==",
+            "state=done:msg=QR",
+            "state=done:msg=QUF",
+        ] {
+            assert_eq!(status_report(body), None, "{body}");
+        }
+
+        let r = status_report("state=done:msg=5a6J5YWo").unwrap();
+        assert_eq!(r.msg.as_deref(), Some("安全"));
+    }
+
+    #[test]
+    fn program_status_empty_text_is_absent() {
+        let r = status_report("state=done:msg=:title=").unwrap();
+        assert_eq!(r.msg, None);
+        assert_eq!(r.title, None);
+    }
+
+    #[test]
+    fn program_status_invisible_formatting_is_removed() {
+        let text = |field: &str, text: &str| {
+            let r = status_report(&format!("state=done:{field}={}", base64_encode(text))).unwrap();
+            match field {
+                "msg" => r.msg,
+                _ => r.title,
+            }
+        };
+
+        // A right-to-left override would show "exe.txt" as "txt.exe"
+        assert_eq!(
+            text("msg", "Saved \u{202e}txt.exe").as_deref(),
+            Some("Saved txt.exe")
+        );
+        assert_eq!(
+            text("title", "\u{2067}a\u{2069}\u{200f}b\u{200b}c\u{feff}").as_deref(),
+            Some("abc")
+        );
+        // Text that is only formatting is absent
+        assert_eq!(text("msg", "\u{202e}\u{200e}"), None);
+        // Joiners in emoji sequences are kept
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        assert_eq!(text("msg", family).as_deref(), Some(family));
+    }
+
+    #[test]
+    fn program_status_discarded_reports() {
+        // 192 bytes of title and 2048 bytes of message are the most
+        // allowed. "QUFB" decodes to "AAA" and "QUE" to "AA".
+        let title = "QUFB".repeat(256 / 4);
+        let msg = format!("{}QUE", "QUFB".repeat(2048 / 3));
+        // Fills the whole sequence, `ESC ] 7501 ; state=idle: ... ESC \`
+        let fill = 4096 - "\x1b]7501;state=idle:".len() - "\x1b\\".len();
+
+        for (body, valid) in [
+            // A missing or unknown state
+            ("".to_string(), false),
+            ("app=cargo".to_string(), false),
+            ("state=sleeping".to_string(), false),
+            ("state=".to_string(), false),
+            ("state=IDLE".to_string(), false),
+            // A key that is too long, even one we don't know or that is
+            // otherwise malformed
+            (format!("state=idle:{}=1", "a".repeat(16)), true),
+            (format!("state=idle:{}=1", "a".repeat(17)), false),
+            (format!("state=idle:{}=1", "A".repeat(17)), false),
+            // An app that is too long, even if a later pair replaces it
+            (format!("state=idle:app={}", "a".repeat(33)), false),
+            (format!("state=idle:app={}:app=ok", "a".repeat(33)), false),
+            // Text at its limits and one step over, even if replaced
+            (format!("state=idle:title={title}"), true),
+            (format!("state=idle:title={title}QUFB"), false),
+            (format!("state=idle:title={title}QUFB:title=QUFB"), false),
+            (format!("state=idle:msg={msg}"), true),
+            (
+                format!("state=idle:msg={}", "QUFB".repeat(2048 / 3 + 1)),
+                false,
+            ),
+            (
+                format!("state=idle:msg={}:msg=QUFB", "QUFB".repeat(684)),
+                false,
+            ),
+            // The whole sequence, including the terminator
+            (format!("state=idle:{}", "x".repeat(fill)), true),
+            (format!("state=idle:{}", "x".repeat(fill + 1)), false),
+        ] {
+            assert_eq!(status_report(&body).is_some(), valid, "{body}");
+        }
+
+        // Numbers that only start like 7501
+        for osc in [
+            &["75", "state=idle"][..],
+            &["750", "state=idle"],
+            &["75010", "state=idle"],
+            &["7501"],
+        ] {
+            let osc: Vec<&[u8]> = osc.iter().map(|s| s.as_bytes()).collect();
+            assert!(
+                !matches!(
+                    OperatingSystemCommand::parse(&osc),
+                    OperatingSystemCommand::ProgramStatus(_)
+                ),
+                "{osc:?}"
+            );
+        }
     }
 
     #[test]

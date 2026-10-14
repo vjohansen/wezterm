@@ -17,8 +17,8 @@ use url::Url;
 use wezterm_dynamic::Value;
 use wezterm_term::color::ColorPalette;
 use wezterm_term::{
-    Clipboard, DownloadHandler, KeyCode, KeyModifiers, MouseEvent, Progress, SemanticZone,
-    StableRowIndex, TerminalConfiguration, TerminalSize,
+    Clipboard, DownloadHandler, KeyCode, KeyModifiers, MouseEvent, ProgramStatus, Progress,
+    SemanticZone, StableRowIndex, TerminalConfiguration, TerminalSize,
 };
 
 static PANE_ID: ::std::sync::atomic::AtomicUsize = ::std::sync::atomic::AtomicUsize::new(0);
@@ -240,6 +240,12 @@ pub trait Pane: Downcast + Send + Sync {
     fn get_progress(&self) -> Progress {
         Progress::None
     }
+    /// Returns the OSC 7501 program status root record
+    fn get_program_status(&self) -> Option<ProgramStatus> {
+        None
+    }
+    /// Removes the OSC 7501 program status root record
+    fn clear_program_status(&self) {}
     fn send_paste(&self, text: &str) -> anyhow::Result<()>;
     fn send_composed_text(&self, text: &str) -> anyhow::Result<()> {
         self.writer().write_all(text.as_bytes())?;

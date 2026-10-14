@@ -67,7 +67,9 @@ use wezterm_dynamic::Value;
 use wezterm_font::FontConfiguration;
 use wezterm_term::color::ColorPalette;
 use wezterm_term::input::LastMouseClick;
-use wezterm_term::{Alert, Progress, StableRowIndex, TerminalConfiguration, TerminalSize};
+use wezterm_term::{
+    Alert, ProgramStatus, Progress, StableRowIndex, TerminalConfiguration, TerminalSize,
+};
 
 pub mod background;
 pub mod box_model;
@@ -273,6 +275,7 @@ pub struct PaneInformation {
     pub title: String,
     pub user_vars: HashMap<String, String>,
     pub progress: Progress,
+    pub program_status: Option<ProgramStatus>,
 }
 
 impl UserData for PaneInformation {
@@ -289,6 +292,13 @@ impl UserData for PaneInformation {
         fields.add_field_method_get("pixel_width", |_, this| Ok(this.pixel_width));
         fields.add_field_method_get("pixel_height", |_, this| Ok(this.pixel_height));
         fields.add_field_method_get("progress", |lua, this| lua.to_value(&this.progress));
+        fields.add_field_method_get("program_status", |lua, this| {
+            // Absent fields become nil rather than a null sentinel
+            lua.to_value_with(
+                &this.program_status,
+                mlua::SerializeOptions::new().serialize_none_to_null(false),
+            )
+        });
         fields.add_field_method_get("title", |_, this| Ok(this.title.clone()));
         fields.add_field_method_get("user_vars", |_, this| Ok(this.user_vars.clone()));
         fields.add_field_method_get("foreground_process_name", |_, this| {
@@ -1214,7 +1224,8 @@ impl TermWindow {
                         | Alert::WindowTitleChanged(_)
                         | Alert::TabTitleChanged(_)
                         | Alert::IconTitleChanged(_)
-                        | Alert::Progress(_),
+                        | Alert::Progress(_)
+                        | Alert::ProgramStatus(_),
                     ..
                 } => {
                     self.update_title();
@@ -1466,6 +1477,7 @@ impl TermWindow {
                     | Alert::TabTitleChanged(_)
                     | Alert::IconTitleChanged(_)
                     | Alert::Progress(_)
+                    | Alert::ProgramStatus(_)
                     | Alert::SetUserVar { .. }
                     | Alert::Bell,
             }
@@ -3452,6 +3464,7 @@ impl TermWindow {
             title: pos.pane.get_title(),
             user_vars: pos.pane.copy_user_vars(),
             progress: pos.pane.get_progress(),
+            program_status: pos.pane.get_program_status(),
         }
     }
 
