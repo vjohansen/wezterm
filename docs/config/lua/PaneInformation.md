@@ -20,7 +20,7 @@ The `PaneInformation` struct contains the following fields:
 * `title` - the title of the pane, per [pane:get_title()](pane/get_title.md) at the time the pane information was captured
 * `user_vars` - the user variables defined for the pane, per [pane:get_user_vars()](pane/get_user_vars.md) at the time the pane information was captured.
 * `progress` - the progress state, per [pane:get_progress()](pane/get_progress.md) at the time the pane information was captured. {{since('nightly', inline=True)}}
-* `program_status` - the OSC 7501 program status record, or `nil`, per [pane:get_program_status()](pane/get_program_status.md) at the time the pane information was captured. {{since('nightly', inline=True)}}
+* `program_status` - the most urgent OSC 7501 program status record, or `nil`, per [pane:get_program_status()](pane/get_program_status.md) at the time the pane information was captured. {{since('nightly', inline=True)}}
 
 {{since('20220101-133340-7edc5b5a')}}
 

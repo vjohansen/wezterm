@@ -503,6 +503,7 @@ pdu! {
     GetPaneDirection: 60,
     GetPaneDirectionResponse: 61,
     AdjustPaneSize: 62,
+    ClearProgramStatusRequest: 63,
 }
 
 impl Pdu {
@@ -1115,6 +1116,22 @@ pub struct GetLinesResponse {
 pub struct EraseScrollbackRequest {
     pub pane_id: PaneId,
     pub erase_mode: ScrollbackEraseMode,
+}
+
+/// Which OSC 7501 program status records to remove
+#[derive(Deserialize, Serialize, PartialEq, Debug)]
+pub enum ProgramStatusRemoval {
+    /// Every record
+    All,
+    /// Just the record with this id, or the root record when `None`;
+    /// records beneath it are kept
+    Record(Option<String>),
+}
+
+#[derive(Deserialize, Serialize, PartialEq, Debug)]
+pub struct ClearProgramStatusRequest {
+    pub pane_id: PaneId,
+    pub records: ProgramStatusRemoval,
 }
 
 #[derive(Deserialize, Serialize, PartialEq, Debug)]

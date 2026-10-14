@@ -44,6 +44,7 @@ pub(crate) struct PerPane {
     mouse_grabbed: bool,
     alt_screen_active: bool,
     sent_initial_palette: bool,
+    sent_initial_program_status: bool,
     seqno: SequenceNo,
     config_generation: usize,
     pub(crate) notifications: Vec<Alert>,
@@ -178,6 +179,16 @@ fn maybe_push_pane_changes(
     if !per_pane.sent_initial_palette {
         per_pane.notifications.push(Alert::PaletteChanged);
         per_pane.sent_initial_palette = true;
+    }
+    if !per_pane.sent_initial_program_status {
+        // Program status records are otherwise only sent when they
+        // change, which would leave a newly attached client without
+        // the records reported before it attached
+        let statuses = pane.get_program_statuses();
+        if !statuses.is_empty() {
+            per_pane.notifications.push(Alert::ProgramStatus(statuses));
+        }
+        per_pane.sent_initial_program_status = true;
     }
     for alert in per_pane.notifications.drain(..) {
         match alert {
@@ -471,6 +482,27 @@ impl SessionHandler {
                                 .get_pane(pane_id)
                                 .ok_or_else(|| anyhow!("no such pane {}", pane_id))?;
                             pane.erase_scrollback(erase_mode);
+                            Ok(Pdu::UnitResponse(UnitResponse {}))
+                        },
+                        send_response,
+                    );
+                })
+                .detach();
+            }
+            Pdu::ClearProgramStatusRequest(ClearProgramStatusRequest { pane_id, records }) => {
+                spawn_into_main_thread(async move {
+                    catch(
+                        move || {
+                            let mux = Mux::get();
+                            let pane = mux
+                                .get_pane(pane_id)
+                                .ok_or_else(|| anyhow!("no such pane {}", pane_id))?;
+                            match records {
+                                ProgramStatusRemoval::All => pane.clear_program_statuses(),
+                                ProgramStatusRemoval::Record(id) => {
+                                    pane.remove_program_status(id.as_deref())
+                                }
+                            }
                             Ok(Pdu::UnitResponse(UnitResponse {}))
                         },
                         send_response,

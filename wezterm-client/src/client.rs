@@ -1384,6 +1384,11 @@ impl Client {
     rpc!(rename_workspace, RenameWorkspace, UnitResponse);
     rpc!(erase_scrollback, EraseScrollbackRequest, UnitResponse);
     rpc!(
+        clear_program_status,
+        ClearProgramStatusRequest,
+        UnitResponse
+    );
+    rpc!(
         get_pane_direction,
         GetPaneDirection,
         GetPaneDirectionResponse

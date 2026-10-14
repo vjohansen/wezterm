@@ -17,7 +17,7 @@ use url::Url;
 use wezterm_dynamic::Value;
 use wezterm_term::color::ColorPalette;
 use wezterm_term::{
-    Clipboard, DownloadHandler, KeyCode, KeyModifiers, MouseEvent, ProgramStatus, Progress,
+    Clipboard, DownloadHandler, KeyCode, KeyModifiers, MouseEvent, ProgramStatusSet, Progress,
     SemanticZone, StableRowIndex, TerminalConfiguration, TerminalSize,
 };
 
@@ -240,12 +240,15 @@ pub trait Pane: Downcast + Send + Sync {
     fn get_progress(&self) -> Progress {
         Progress::None
     }
-    /// Returns the OSC 7501 program status root record
-    fn get_program_status(&self) -> Option<ProgramStatus> {
-        None
+    /// Returns the OSC 7501 program status records
+    fn get_program_statuses(&self) -> ProgramStatusSet {
+        ProgramStatusSet::default()
     }
-    /// Removes the OSC 7501 program status root record
-    fn clear_program_status(&self) {}
+    /// Removes every OSC 7501 program status record
+    fn clear_program_statuses(&self) {}
+    /// Removes the OSC 7501 program status record `id`, or the root
+    /// record when `id` is `None`; records beneath it are kept
+    fn remove_program_status(&self, _id: Option<&str>) {}
     fn send_paste(&self, text: &str) -> anyhow::Result<()>;
     fn send_composed_text(&self, text: &str) -> anyhow::Result<()> {
         self.writer().write_all(text.as_bytes())?;

@@ -350,8 +350,8 @@ pub struct TerminalState {
     /// The icon title string (OSC 1)
     icon_title: Option<String>,
     progress: Progress,
-    /// The root OSC 7501 program status record
-    program_status: Option<ProgramStatus>,
+    /// The OSC 7501 program status records
+    program_status: ProgramStatusSet,
 
     palette: Option<ColorPalette>,
 
@@ -597,7 +597,7 @@ impl TerminalState {
             bidi_enabled: None,
             bidi_hint: None,
             progress: Progress::default(),
-            program_status: None,
+            program_status: ProgramStatusSet::default(),
         }
     }
 
@@ -663,33 +663,34 @@ impl TerminalState {
         self.progress.clone()
     }
 
-    pub fn get_program_status(&self) -> Option<ProgramStatus> {
+    pub fn get_program_statuses(&self) -> ProgramStatusSet {
         self.program_status.clone()
     }
 
-    /// Removes the program status record, eg: once the user has
-    /// seen a `done` or `error` result
-    pub fn clear_program_status(&mut self) {
-        self.set_program_status(None);
+    /// Removes every program status record
+    pub fn clear_program_statuses(&mut self) {
+        self.modify_program_statuses(|set| set.clear(None));
+    }
+
+    /// Removes the program status record `id`, or the root record
+    /// when `id` is `None`, eg: once the user has seen a `done` or
+    /// `error` result. Records beneath it are kept.
+    pub fn remove_program_status(&mut self, id: Option<&str>) {
+        self.modify_program_statuses(|set| set.remove(id));
     }
 
     /// Drops `working` and `blocked` records, which do not survive
     /// process exit or the start of a new shell prompt
-    pub fn drop_transient_program_status(&mut self) {
-        if self
-            .program_status
-            .as_ref()
-            .map_or(false, ProgramStatus::is_transient)
-        {
-            self.set_program_status(None);
-        }
+    pub fn drop_transient_program_statuses(&mut self) {
+        self.modify_program_statuses(ProgramStatusSet::drop_transient);
     }
 
-    fn set_program_status(&mut self, status: Option<ProgramStatus>) {
-        if status != self.program_status {
-            self.program_status = status.clone();
+    /// Applies `f`, which returns true if it changed the set, and
+    /// alerts when it did
+    fn modify_program_statuses(&mut self, f: impl FnOnce(&mut ProgramStatusSet) -> bool) {
+        if f(&mut self.program_status) {
             if let Some(handler) = self.alert_handler.as_mut() {
-                handler.alert(Alert::ProgramStatus(status));
+                handler.alert(Alert::ProgramStatus(self.program_status.clone()));
             }
         }
     }

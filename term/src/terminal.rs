@@ -64,11 +64,13 @@ pub enum ProgramStatusKind {
     Auth,
 }
 
-/// The root OSC 7501 Program Status record.
+/// An OSC 7501 Program Status record.
 /// `title` and `msg` hold decoded text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "use_serde", derive(Serialize, Deserialize))]
 pub struct ProgramStatus {
+    /// The record's id, such as `build/test`; `None` for the root record
+    pub id: Option<String>,
     pub state: ProgramState,
     pub kind: Option<ProgramStatusKind>,
     pub progress: Option<u8>,
@@ -82,6 +84,135 @@ impl ProgramStatus {
     /// or the start of a new shell prompt
     pub fn is_transient(&self) -> bool {
         matches!(self.state, ProgramState::Working | ProgramState::Blocked)
+    }
+
+    /// How urgently the record needs the user's attention:
+    /// blocked > error > working > done > idle
+    pub fn urgency(&self) -> u8 {
+        match self.state {
+            ProgramState::Idle => 1,
+            ProgramState::Done => 2,
+            ProgramState::Working => 3,
+            ProgramState::Error => 4,
+            ProgramState::Blocked => 5,
+        }
+    }
+
+    /// Whether this record is `id` or one of its descendants
+    fn is_within(&self, id: &str) -> bool {
+        match &self.id {
+            Some(own) => {
+                own == id || (own.starts_with(id) && own.as_bytes().get(id.len()) == Some(&b'/'))
+            }
+            None => false,
+        }
+    }
+}
+
+/// The set of OSC 7501 Program Status records held by a terminal:
+/// the root record plus any child records addressed by `id`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "use_serde", derive(Serialize, Deserialize))]
+pub struct ProgramStatusSet {
+    /// Ordered from least to most recently updated
+    records: Vec<ProgramStatus>,
+}
+
+impl ProgramStatusSet {
+    /// When a report would create a record past this cap, the record
+    /// that was updated least recently is removed to make room
+    pub const MAX_RECORDS: usize = 256;
+
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    /// Replaces the record with the same id as `status`, or adds it.
+    /// Returns true if the set changed.
+    pub fn update(&mut self, status: ProgramStatus) -> bool {
+        if self.records.last() == Some(&status) {
+            return false;
+        }
+        self.records.retain(|r| r.id != status.id);
+        self.records.push(status);
+        if self.records.len() > Self::MAX_RECORDS {
+            self.records.remove(0);
+        }
+        true
+    }
+
+    /// Applies a `state=clear` report: removes the record `id` and
+    /// every record beneath it, or every record when `id` is `None`.
+    /// Returns true if the set changed.
+    pub fn clear(&mut self, id: Option<&str>) -> bool {
+        let before = self.records.len();
+        match id {
+            Some(id) => self.records.retain(|r| !r.is_within(id)),
+            None => self.records.clear(),
+        }
+        self.records.len() != before
+    }
+
+    /// Removes just the record `id`, or the root record when `id` is
+    /// `None`; records beneath it are kept.
+    /// Returns true if the set changed.
+    pub fn remove(&mut self, id: Option<&str>) -> bool {
+        let before = self.records.len();
+        self.records.retain(|r| r.id.as_deref() != id);
+        self.records.len() != before
+    }
+
+    /// Drops `working` and `blocked` records.
+    /// Returns true if the set changed.
+    pub fn drop_transient(&mut self) -> bool {
+        let before = self.records.len();
+        self.records.retain(|r| !r.is_transient());
+        self.records.len() != before
+    }
+
+    /// Returns the record `id`, or the root record when `id` is `None`
+    pub fn get(&self, id: Option<&str>) -> Option<ProgramStatus> {
+        self.records
+            .iter()
+            .find(|r| r.id.as_deref() == id)
+            .map(|r| self.resolve(r))
+    }
+
+    /// Returns the record that most urgently needs the user's
+    /// attention; of equally urgent records, the most recently
+    /// updated one wins
+    pub fn most_urgent(&self) -> Option<ProgramStatus> {
+        self.records
+            .iter()
+            .max_by_key(|r| r.urgency())
+            .map(|r| self.resolve(r))
+    }
+
+    /// Returns every record, the root record first and the
+    /// rest ordered by id
+    pub fn records(&self) -> Vec<ProgramStatus> {
+        let mut records: Vec<_> = self.records.iter().map(|r| self.resolve(r)).collect();
+        records.sort_by(|a, b| a.id.cmp(&b.id));
+        records
+    }
+
+    /// A record without an `app` takes the `app` of its nearest
+    /// ancestor that has one
+    fn resolve(&self, record: &ProgramStatus) -> ProgramStatus {
+        let mut record = record.clone();
+        let mut ancestor = record.id.clone();
+        while record.app.is_none() {
+            let Some(id) = ancestor else {
+                break;
+            };
+            ancestor = id.rfind('/').map(|idx| id[..idx].to_string());
+            record.app = self
+                .records
+                .iter()
+                .find(|r| r.id == ancestor)
+                .and_then(|r| r.app.clone());
+        }
+        record
     }
 }
 
@@ -114,8 +245,8 @@ pub enum Alert {
     OutputSinceFocusLost,
     /// A change to the progress bar state
     Progress(Progress),
-    /// A change to the OSC 7501 program status record
-    ProgramStatus(Option<ProgramStatus>),
+    /// A change to the OSC 7501 program status records
+    ProgramStatus(ProgramStatusSet),
 }
 
 pub trait AlertHandler: Send + Sync {

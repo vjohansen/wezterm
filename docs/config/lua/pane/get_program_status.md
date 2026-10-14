@@ -1,9 +1,9 @@
-# `pane:get_program_status()`
+# `pane:get_program_status([id])`
 
 {{since('nightly')}}
 
-Returns the *program status* record associated with the pane, or `nil` if no
-program has reported one.
+Returns a *program status* record associated with the pane, or `nil` if there
+is no such record.
 
 A program reports what it is doing using the [Program Status
 Protocol](https://www.superlogical.com/rex/docs/build/program-status) OSC
@@ -32,28 +32,58 @@ which is returned as:
 
 The returned table has the following fields; all but `state` may be `nil`:
 
+* `id` - the record's id, such as `"build/test"`; `nil` for the root record
 * `state` - one of `"idle"`, `"working"`, `"done"`, `"blocked"` or `"error"`
 * `kind` - what a `blocked` program is waiting on: `"permission"`,
   `"question"` or `"auth"`
 * `progress` - a number from 0 to 100, for `working` or `blocked`
-* `app` - a stable machine-readable name for the program, such as `cargo`
+* `app` - a stable machine-readable name for the program, such as `cargo`.
+  A child record without an `app` takes the `app` of its nearest ancestor.
 * `title` - a short human-readable label (decoded from base64)
 * `msg` - one human-readable line describing the state (decoded from base64)
 
-Each report replaces the record completely. A report with `state=clear`
-removes it. `working` and `blocked` records are removed when the process
-attached to the pane exits, or when a new shell prompt begins (`OSC 133 ; A`,
-emitted by [shell integration](../../../shell-integration.md)). `idle`, `done`
-and `error` records remain until they are replaced, or until you remove them
-with [pane:clear_program_status()](clear_program_status.md).
+`title` and `msg` come from the program, so treat them as untrusted text. A
+report whose text contains control characters is ignored. Text direction
+overrides and other invisible formatting characters are removed, so that the
+text cannot appear different from what it is when shown in a tab title or
+the status area.
 
-WezTerm only tracks the root record: reports that carry an `id` are ignored.
+### Records and ids
+
+A program reports its own state using the *root* record, which has no id. A
+program that does several things at once can also report *child* records,
+each addressed by an `id` such as `us-east` or `build/test`; `build/test` is
+a child of `build`. The pane holds all of these records at the same time, up
+to 256 of them.
+
+When *id* is omitted, returns the record that most urgently needs your
+attention, in the order `blocked`, `error`, `working`, `done`, `idle`. Of
+equally urgent records, the most recently updated one is returned. When a
+program only reports the root record, this is the root record.
+
+When *id* is `""`, returns the root record.
+
+Otherwise, returns the child record whose id is *id*.
+
+[pane:get_program_statuses()](get_program_statuses.md) returns every record.
+
+### Lifetime
+
+Each report replaces its record completely. A report with `state=clear`
+removes the addressed record and every record beneath it, or every record
+when it has no `id`. `working` and `blocked` records are removed when the
+process attached to the pane exits, or when a new shell prompt begins
+(`OSC 133 ; A`, emitted by [shell integration](../../../shell-integration.md)).
+`idle`, `done` and `error` records remain until they are replaced, or until
+you remove them with [pane:clear_program_status()](clear_program_status.md).
+A full reset (`ESC c`) removes every record.
+
 WezTerm replies to the `ESC ] 7501 ; ? ST` feature detection query.
 
-When the record changes, WezTerm triggers an update of the tab bar, which will
+When a record changes, WezTerm triggers an update of the tab bar, which will
 in turn cause events such as
-[format-tab-title](../window-events/format-tab-title.md) to trigger. The
-record is also available as the `program_status` field of
+[format-tab-title](../window-events/format-tab-title.md) to trigger. The most
+urgent record is also available as the `program_status` field of
 [PaneInformation](../PaneInformation.md).
 
 The program status is not directly used by wezterm, but you can use it to

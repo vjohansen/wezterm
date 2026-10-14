@@ -720,7 +720,7 @@ impl<'a> Performer<'a> {
                 self.suppress_initial_title_change = false;
                 self.accumulating_title.take();
                 self.progress = Progress::default();
-                self.set_program_status(None);
+                self.clear_program_statuses();
 
                 self.screen.full_reset();
                 self.screen.activate_alt_screen(seqno);
@@ -873,7 +873,7 @@ impl<'a> Performer<'a> {
             ) => {
                 self.fresh_line();
                 self.pen.set_semantic_type(SemanticType::Prompt);
-                self.drop_transient_program_status();
+                self.drop_transient_program_statuses();
             }
             OperatingSystemCommand::FinalTermSemanticPrompt(
                 FinalTermSemanticPrompt::StartPrompt(_),
@@ -1107,15 +1107,10 @@ impl<'a> Performer<'a> {
                 use wezterm_escape_parser::osc::{
                     ProgramState as TState, ProgramStatusKind as TKind,
                 };
-                // Only the root record is supported for now; a report
-                // with an id addresses a child record, and clearing a
-                // child cannot affect the root
-                if report.id.is_some() {
-                    return;
-                }
                 let state = match report.state {
                     TState::Clear => {
-                        self.set_program_status(None);
+                        let id = report.id.as_deref();
+                        self.modify_program_statuses(|set| set.clear(id));
                         return;
                     }
                     TState::Idle => ProgramState::Idle,
@@ -1124,7 +1119,8 @@ impl<'a> Performer<'a> {
                     TState::Blocked => ProgramState::Blocked,
                     TState::Error => ProgramState::Error,
                 };
-                self.set_program_status(Some(ProgramStatus {
+                let status = ProgramStatus {
+                    id: report.id,
                     state,
                     kind: report.kind.map(|kind| match kind {
                         TKind::Permission => ProgramStatusKind::Permission,
@@ -1135,7 +1131,8 @@ impl<'a> Performer<'a> {
                     app: report.app,
                     title: report.title,
                     msg: report.msg,
-                }));
+                };
+                self.modify_program_statuses(|set| set.update(status));
             }
         }
     }

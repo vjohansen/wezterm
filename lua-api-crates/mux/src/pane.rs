@@ -153,21 +153,40 @@ impl UserData for MuxPane {
             lua.to_value(&progress)
         });
 
-        methods.add_method("get_program_status", |lua, this, _: ()| {
+        // Absent fields become nil rather than a null sentinel
+        let options = mlua::SerializeOptions::new().serialize_none_to_null(false);
+
+        // With no id, the most urgent record; "" is the root record
+        methods.add_method(
+            "get_program_status",
+            move |lua, this, id: Option<String>| {
+                let mux = get_mux()?;
+                let pane = this.resolve(&mux)?;
+                let statuses = pane.get_program_statuses();
+                let status = match id.as_deref() {
+                    None => statuses.most_urgent(),
+                    Some("") => statuses.get(None),
+                    Some(id) => statuses.get(Some(id)),
+                };
+                lua.to_value_with(&status, options)
+            },
+        );
+
+        methods.add_method("get_program_statuses", move |lua, this, _: ()| {
             let mux = get_mux()?;
             let pane = this.resolve(&mux)?;
-            let status = pane.get_program_status();
-            // Absent fields become nil rather than a null sentinel
-            lua.to_value_with(
-                &status,
-                mlua::SerializeOptions::new().serialize_none_to_null(false),
-            )
+            lua.to_value_with(&pane.get_program_statuses().records(), options)
         });
 
-        methods.add_method("clear_program_status", |_, this, _: ()| {
+        // With no id, removes every record; "" is the root record
+        methods.add_method("clear_program_status", |_, this, id: Option<String>| {
             let mux = get_mux()?;
             let pane = this.resolve(&mux)?;
-            pane.clear_program_status();
+            match id.as_deref() {
+                None => pane.clear_program_statuses(),
+                Some("") => pane.remove_program_status(None),
+                Some(id) => pane.remove_program_status(Some(id)),
+            }
             Ok(())
         });
 

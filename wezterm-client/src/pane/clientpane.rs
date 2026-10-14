@@ -27,7 +27,7 @@ use url::Url;
 use wezterm_dynamic::Value;
 use wezterm_term::color::ColorPalette;
 use wezterm_term::{
-    Alert, Clipboard, KeyCode, KeyModifiers, Line, MouseEvent, ProgramStatus, Progress,
+    Alert, Clipboard, KeyCode, KeyModifiers, Line, MouseEvent, ProgramStatusSet, Progress,
     StableRowIndex, TerminalConfiguration, TerminalSize,
 };
 
@@ -50,10 +50,39 @@ pub struct ClientPane {
     config: Mutex<Option<Arc<dyn TerminalConfiguration>>>,
     unseen_output: Mutex<bool>,
     progress: Mutex<Progress>,
-    program_status: Mutex<Option<ProgramStatus>>,
+    program_status: Mutex<ProgramStatusSet>,
 }
 
 impl ClientPane {
+    fn modify_program_statuses(&self, f: impl FnOnce(&mut ProgramStatusSet) -> bool) {
+        let mut statuses = self.program_status.lock();
+        if f(&mut statuses) {
+            let alert = Alert::ProgramStatus(statuses.clone());
+            drop(statuses);
+            Mux::get().notify(MuxNotification::Alert {
+                pane_id: self.local_pane_id,
+                alert,
+            });
+        }
+    }
+
+    /// The records live in the remote terminal; without this, the next
+    /// report from the server would restore records cleared locally
+    fn send_clear_program_status(&self, records: ProgramStatusRemoval) {
+        let client = Arc::clone(&self.client);
+        let remote_pane_id = self.remote_pane_id;
+        promise::spawn::spawn(async move {
+            client
+                .client
+                .clear_program_status(ClearProgramStatusRequest {
+                    pane_id: remote_pane_id,
+                    records,
+                })
+                .await
+        })
+        .detach();
+    }
+
     pub fn new(
         client: &Arc<ClientInner>,
         remote_tab_id: TabId,
@@ -134,7 +163,7 @@ impl ClientPane {
             user_vars: Mutex::new(HashMap::new()),
             config: Mutex::new(None),
             progress: Mutex::new(Progress::default()),
-            program_status: Mutex::new(None),
+            program_status: Mutex::new(ProgramStatusSet::default()),
         }
     }
 
@@ -204,8 +233,8 @@ impl ClientPane {
                             alert: Alert::Progress(progress.clone()),
                         });
                     }
-                    Alert::ProgramStatus(status) => {
-                        *self.program_status.lock() = status.clone();
+                    Alert::ProgramStatus(statuses) => {
+                        *self.program_status.lock() = statuses.clone();
                     }
                     _ => {}
                 }
@@ -337,19 +366,18 @@ impl Pane for ClientPane {
         self.progress.lock().clone()
     }
 
-    fn get_program_status(&self) -> Option<ProgramStatus> {
+    fn get_program_statuses(&self) -> ProgramStatusSet {
         self.program_status.lock().clone()
     }
 
-    /// Only clears the locally cached record; the record held by
-    /// the remote terminal is unaffected
-    fn clear_program_status(&self) {
-        if self.program_status.lock().take().is_some() {
-            Mux::get().notify(MuxNotification::Alert {
-                pane_id: self.local_pane_id,
-                alert: Alert::ProgramStatus(None),
-            });
-        }
+    fn clear_program_statuses(&self) {
+        self.modify_program_statuses(|set| set.clear(None));
+        self.send_clear_program_status(ProgramStatusRemoval::All);
+    }
+
+    fn remove_program_status(&self, id: Option<&str>) {
+        self.modify_program_statuses(|set| set.remove(id));
+        self.send_clear_program_status(ProgramStatusRemoval::Record(id.map(str::to_string)));
     }
 
     fn send_paste(&self, text: &str) -> anyhow::Result<()> {

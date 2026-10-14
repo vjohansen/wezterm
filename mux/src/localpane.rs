@@ -32,7 +32,7 @@ use wezterm_dynamic::Value;
 use wezterm_term::color::ColorPalette;
 use wezterm_term::{
     Alert, AlertHandler, Clipboard, DownloadHandler, KeyCode, KeyModifiers, MouseEvent,
-    ProgramStatus, Progress, SemanticZone, StableRowIndex, Terminal, TerminalConfiguration,
+    ProgramStatusSet, Progress, SemanticZone, StableRowIndex, Terminal, TerminalConfiguration,
     TerminalSize,
 };
 
@@ -377,7 +377,7 @@ impl Pane for LocalPane {
         if child_exited {
             // working and blocked program status records do not
             // survive the exit of the process attached to the pane
-            self.terminal.lock().drop_transient_program_status();
+            self.terminal.lock().drop_transient_program_statuses();
         }
 
         dead
@@ -478,12 +478,16 @@ impl Pane for LocalPane {
         self.terminal.lock().get_progress()
     }
 
-    fn get_program_status(&self) -> Option<ProgramStatus> {
-        self.terminal.lock().get_program_status()
+    fn get_program_statuses(&self) -> ProgramStatusSet {
+        self.terminal.lock().get_program_statuses()
     }
 
-    fn clear_program_status(&self) {
-        self.terminal.lock().clear_program_status();
+    fn clear_program_statuses(&self) {
+        self.terminal.lock().clear_program_statuses();
+    }
+
+    fn remove_program_status(&self, id: Option<&str>) {
+        self.terminal.lock().remove_program_status(id);
     }
 
     fn palette(&self) -> ColorPalette {

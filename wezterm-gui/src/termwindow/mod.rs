@@ -3464,7 +3464,7 @@ impl TermWindow {
             title: pos.pane.get_title(),
             user_vars: pos.pane.copy_user_vars(),
             progress: pos.pane.get_progress(),
-            program_status: pos.pane.get_program_status(),
+            program_status: pos.pane.get_program_statuses().most_urgent(),
         }
     }
 
